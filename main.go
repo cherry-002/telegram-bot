@@ -5,9 +5,21 @@ import (
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
 
-var currentCommand string
-var awaitingUserName, awaitingPhone, awaitingPanelName, awaitingPayment, awaitingReceipt bool
-var selectedService, panelName, userName, phoneNumber string
+// UserState holds individual user information and progress
+type UserState struct {
+	AwaitingUserName  bool
+	AwaitingPhone     bool
+	AwaitingPanelName bool
+	AwaitingPayment   bool
+	AwaitingReceipt   bool
+	SelectedService   string
+	UserName          string
+	PhoneNumber       string
+	PanelName         string
+}
+
+// Map to store user states by chat ID
+var userStates = make(map[int64]*UserState)
 
 // Admin User ID (who will receive the purchase details)
 const AdminUserID int64 = 94152088
@@ -18,7 +30,7 @@ func main() {
 		log.Panic(err)
 	}
 
-	bot.Debug = true
+	bot.Debug = false
 	updateConfig := tgbotapi.NewUpdate(0)
 	updateConfig.Timeout = 60
 
@@ -26,68 +38,107 @@ func main() {
 
 	for update := range updates {
 		if update.Message != nil {
-			// Handle different states (awaiting user input for name, phone, panel, etc.)
-			if awaitingUserName {
-				userName = update.Message.Text
-				askForPhone(update.Message, bot)
-				awaitingUserName = false
-				awaitingPhone = true
-				continue
-			}
-
-			if awaitingPhone {
-				phoneNumber = update.Message.Text
-				if currentCommand == "تمدید سرویس" {
-					askForReceipt(update.Message, bot)
-					awaitingPhone = false
-					awaitingReceipt = true
-				} else {
-					askForReceipt(update.Message, bot)
-					awaitingPhone = false
-					awaitingReceipt = true
-				}
-				continue
-			}
-
-			if awaitingPanelName {
-				panelName = update.Message.Text
-				askForReceipt(update.Message, bot)
-				awaitingPanelName = false
-				awaitingReceipt = true
-				continue
-			}
-
-			if awaitingReceipt && update.Message.Photo != nil {
-				// Send purchase details to the admin
-				sendPurchaseDetailsToAdmin(update.Message, bot)
-				// Confirm the request to the user
-				confirmRequest(update.Message, bot)
-				// Return user to main menu
-				showMainMenu(update.Message, bot)
-				continue
-			}
-
-			// Handle command or options selection
-			if update.Message.IsCommand() {
-				switch update.Message.Command() {
-				case "start":
-					showMainMenu(update.Message, bot)
-				default:
-					msg := tgbotapi.NewMessage(update.Message.Chat.ID, "Unknown command")
-					bot.Send(msg)
-				}
-			} else {
-				handleSelection(update.Message, bot)
-			}
+			handleUpdate(update.Message, bot)
 		}
 	}
 }
 
+func handleUpdate(message *tgbotapi.Message, bot *tgbotapi.BotAPI) {
+	chatID := message.Chat.ID
+	state, exists := userStates[chatID]
+	if !exists {
+		// Initialize new state if it doesn't exist
+		state = &UserState{}
+		userStates[chatID] = state
+	}
 
-func sendPurchaseDetailsToAdmin(message *tgbotapi.Message, bot *tgbotapi.BotAPI) {
+	// Handle different stages of interaction
+	if state.AwaitingUserName {
+		state.UserName = message.Text
+		askForPhone(message, bot)
+		state.AwaitingUserName = false
+		state.AwaitingPhone = true
+		return
+	}
+
+	if state.AwaitingPhone {
+		state.PhoneNumber = message.Text
+		askForReceipt(message, bot)
+		state.AwaitingPhone = false
+		state.AwaitingReceipt = true
+		return
+	}
+
+	if state.AwaitingReceipt && message.Photo != nil {
+		sendPurchaseDetailsToAdmin(message, bot, state)
+		confirmRequest(message, bot)
+		showMainMenu(message, bot)
+		delete(userStates, chatID) // Clean up state after completion
+		return
+	}
+
+	// Handle command or options selection
+	if message.IsCommand() {
+		switch message.Command() {
+		case "start":
+			showMainMenu(message, bot)
+		default:
+			msg := tgbotapi.NewMessage(message.Chat.ID, "Unknown command")
+			bot.Send(msg)
+		}
+	} else {
+		handleSelection(message, bot, state)
+	}
+}
+
+func handleSelection(message *tgbotapi.Message, bot *tgbotapi.BotAPI, state *UserState) {
+	switch message.Text {
+	case "خرید سرویس":
+		showServiceOptions(message, bot)
+	case "تمدید سرویس":
+		startRenewalProcess(message, bot, state)
+	case "تک کاربره":
+		showSingleUserOptions(message, bot)
+	case "دو کاربره":
+		showTwoUserOptions(message, bot)
+	case "نامحدود":
+		showUnlimitedOptions(message, bot)
+	case "Back":
+		showServiceOptions(message, bot)
+	case "۴۰ گیگ ۱ ماهه:۷۵ تومن", "۶۰ گیگ ۱ ماهه:۹۰ تومن", "۷۵ گیگ ۱ ماهه:۱۰۰ تومن", "۱۰۰گیگ ۱ ماهه:۱۲۰تومن",
+		"۷۰گیگ ۱ ماهه ۱۲۰ تومن", "۹۰ گیگ ۱ ماهه ۱۴۰ تومن", "۱۲۰گیگ ۱ ماهه ۱۶۰ تومن", "۲۰۰ گیگ ۱ ماهه ۲۲۰ تومن",
+		"۱ ماهه ۱۵۰ گیگ ۲۵۰ تومن", "۱ماهه ۲۵۰ گیگ ۳۱۵ تومن", "۱ماهه ۳۵۰ گیگ  ۴۰۰ تومن":
+		state.SelectedService = message.Text
+		// Only ask for the name here, no need to ask again in askForName
+		state.AwaitingUserName = true
+		msg := tgbotapi.NewMessage(message.Chat.ID, "لطفاً نام خود را وارد کنید:")
+		msg.ReplyMarkup = tgbotapi.NewRemoveKeyboard(true)
+		bot.Send(msg)
+
+	default:
+		// Handle receipt or other messages
+		if len(message.Photo) > 0 && state.AwaitingReceipt {
+			sendPurchaseDetailsToAdmin(message, bot, state)
+			confirmRequest(message, bot)
+			showMainMenu(message, bot)
+			delete(userStates, message.Chat.ID) // Clean up state after completion
+		} else {
+			msg := tgbotapi.NewMessage(message.Chat.ID, "گزینه نامعتبر است. لطفاً دوباره امتحان کنید.")
+			bot.Send(msg)
+		}
+	}
+}
+
+func startRenewalProcess(message *tgbotapi.Message, bot *tgbotapi.BotAPI, state *UserState) {
+	state.SelectedService = "تمدید سرویس"
+	msg := tgbotapi.NewMessage(message.Chat.ID, "برای تمدید سرویس لطفاً نام خود را وارد کنید:")
+	bot.Send(msg)
+	state.AwaitingUserName = true
+}
+
+func sendPurchaseDetailsToAdmin(message *tgbotapi.Message, bot *tgbotapi.BotAPI, state *UserState) {
 	// Prepare the message to send to the admin
-	adminMessage := tgbotapi.NewMessage(AdminUserID, "درخواست خرید:\n" + selectedService + "\nنام: " + userName + "\nشماره تلفن: " + phoneNumber + "\nنام پنل: " + panelName)
-	// Send the message to the admin
+	adminMessage := tgbotapi.NewMessage(AdminUserID, "درخواست خرید:\n" + state.SelectedService + "\nنام: " + state.UserName + "\nشماره تلفن: " + state.PhoneNumber + "\nنام پنل: " + state.PanelName)
 	bot.Send(adminMessage)
 
 	// Send the photo (receipt) to the admin as well
@@ -109,48 +160,6 @@ func showMainMenu(message *tgbotapi.Message, bot *tgbotapi.BotAPI) {
 	msg.ReplyMarkup = mainKeyboard
 	bot.Send(msg)
 }
-
-func handleSelection(message *tgbotapi.Message, bot *tgbotapi.BotAPI) {
-	switch message.Text {
-	case "خرید سرویس":
-		showServiceOptions(message, bot)
-	case "تمدید سرویس":
-		startRenewalProcess(message, bot)
-	case "تک کاربره":
-		showSingleUserOptions(message, bot)
-	case "دو کاربره":
-		showTwoUserOptions(message, bot)
-	case "نامحدود":
-		showUnlimitedOptions(message, bot)
-	case "Back":
-		showServiceOptions(message, bot)
-	case "۴۰ گیگ ۱ ماهه:۷۵ تومن", "۶۰ گیگ ۱ ماهه:۹۰ تومن", "۷۵ گیگ ۱ ماهه:۱۰۰ تومن", "۱۰۰گیگ ۱ ماهه:۱۲۰تومن",
-		"۷۰گیگ ۱ ماهه ۱۲۰ تومن", "۹۰ گیگ ۱ ماهه ۱۴۰ تومن", "۱۲۰گیگ ۱ ماهه ۱۶۰ تومن", "۲۰۰ گیگ ۱ ماهه ۲۲۰ تومن",
-		"۱ ماهه ۱۵۰ گیگ ۲۵۰ تومن", "۱ماهه ۲۵۰ گیگ ۳۱۵ تومن", "۱ماهه ۳۵۰ گیگ  ۴۰۰ تومن":
-		selectedService = message.Text
-		askForName(message, bot)
-	default:
-		// Handle non-text inputs such as images (photos)
-		if len(message.Photo) > 0 && awaitingReceipt {
-			// Handle the image upload and receipt
-			sendPurchaseDetailsToAdmin(message, bot)
-			confirmRequest(message, bot)
-			showMainMenu(message, bot)
-		} else {
-			msg := tgbotapi.NewMessage(message.Chat.ID, "گزینه نامعتبر است. لطفاً دوباره امتحان کنید.")
-			bot.Send(msg)
-		}
-	}
-}
-
-
-func startRenewalProcess(message *tgbotapi.Message, bot *tgbotapi.BotAPI) {
-	currentCommand = "تمدید سرویس"
-	msg := tgbotapi.NewMessage(message.Chat.ID, "برای تمدید سرویس لطفاً نام خود را وارد کنید:")
-	bot.Send(msg)
-	awaitingUserName = true // Set awaitingUserName to true
-}
-
 
 func showServiceOptions(message *tgbotapi.Message, bot *tgbotapi.BotAPI) {
 	msg := tgbotapi.NewMessage(message.Chat.ID, "لطفاً نوع سرویس را انتخاب کنید:")
@@ -224,24 +233,13 @@ func showUnlimitedOptions(message *tgbotapi.Message, bot *tgbotapi.BotAPI) {
 	bot.Send(msg)
 }
 
-func askForName(message *tgbotapi.Message, bot *tgbotapi.BotAPI) {
-	msg := tgbotapi.NewMessage(message.Chat.ID, "لطفاً نام خود را وارد کنید:")
-	bot.Send(msg)
-	awaitingUserName = true
-}
-
 func askForPhone(message *tgbotapi.Message, bot *tgbotapi.BotAPI) {
-	msg := tgbotapi.NewMessage(message.Chat.ID, "لطفا شماره تلفن یا آیدی تلگرام خود را وارد کنید (ترجیحا آیدی):")
-	bot.Send(msg)
-}
-
-func askForPanelName(message *tgbotapi.Message, bot *tgbotapi.BotAPI) {
-	msg := tgbotapi.NewMessage(message.Chat.ID, "اگر از قبل سرویسی از ما خریداری کرده اید، نام پنل آن سرویس را وارد کنید.\nتوجه داشته باشید که در غیر این صورت پنل جدیدی برای شما ساخته میشود!")
+	msg := tgbotapi.NewMessage(message.Chat.ID, "لطفاً شماره تلفن خود را وارد کنید:")
 	bot.Send(msg)
 }
 
 func askForReceipt(message *tgbotapi.Message, bot *tgbotapi.BotAPI) {
-	msg := tgbotapi.NewMessage(message.Chat.ID, "لطفاً عکس رسید خرید خود را ارسال کنید:")
+	msg := tgbotapi.NewMessage(message.Chat.ID, "لطفاً رسید پرداخت را ارسال کنید:")
 	bot.Send(msg)
 }
 
